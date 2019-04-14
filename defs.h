@@ -116,6 +116,8 @@ void            sched(void);
 void            sleep(void*, struct spinlock*);
 void            userinit(void);
 int             wait(void);
+int 			wait_stat(int *wtime, int *rtime, int *iotime, int* status);
+//wtime = waiting time, rtime = runninng time, iotime = waitng for I/O time, status returns pid or -1 for failure
 void            wakeup(void*);
 void            yield(void);
 

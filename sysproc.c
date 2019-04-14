@@ -42,6 +42,28 @@ sys_getpid(void)
   return proc->pid;
 }
 
+int sys_wait_stat(void){
+  int* wtime;
+  int* rtime;
+  int* iotime;
+  int* status;
+
+  if(argptr(0, (void*)&wtime, sizeof(&wtime)) < 0){ 
+    return -1;
+  }
+  if(argptr(1, (void*)&rtime, sizeof(&rtime)) < 0){
+    return -1;
+  }
+  if(argptr(2, (void*)&iotime, sizeof(&iotime)) < 0){
+    return -1;
+  }
+  if(argptr(3, (void*)&status, sizeof(&status)) < 0){
+    return -1;
+  }
+  //return pid
+  return wait_stat(wtime, rtime, iotime, status);
+}
+
 int
 sys_sbrk(void)
 {
@@ -89,3 +111,4 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+

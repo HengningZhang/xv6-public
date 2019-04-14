@@ -15,10 +15,15 @@ struct {
 static struct proc *initproc;
 
 int nextpid = 1;
+int queueInd = 0;
 extern void forkret(void);
 extern void trapret(void);
 
 static void wakeup1(void *chan);
+
+uint getSysTicks(void){
+  return ticks;
+}
 
 void
 pinit(void)
@@ -48,6 +53,8 @@ found:
   p->state = EMBRYO;
   p->pid = nextpid++;
   release(&ptable.lock);
+  p->ctime = getSysTicks();
+  p->procQueue = queueInd++;
 
   // Allocate kernel stack.
   if((p->kstack = kalloc()) == 0){
@@ -121,7 +128,27 @@ growproc(int n)
   switchuvm(proc);
   return 0;
 }
-
+void increaseTicks(void) {
+  struct proc *p;
+  acquire(&ptable.lock);
+  for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+    switch (p->state) {
+    case RUNNABLE:
+      p->retime++;
+      break;
+    case SLEEPING:
+      p->stime++;
+      break;
+    case RUNNING:
+      p->rutime++;
+      p->procQueue++;
+      break;
+    default:
+      break;
+    }
+  }
+  release(&ptable.lock);
+}
 // Create a new process copying p as the parent.
 // Sets up stack to return as if from system call.
 // Caller must set state of returned proc to RUNNABLE.
@@ -204,7 +231,7 @@ exit(void)
         wakeup1(initproc);
     }
   }
-
+  p->ttime = getSysTicks();
   // Jump into the scheduler, never to return.
   proc->state = ZOMBIE;
   sched();
@@ -238,6 +265,15 @@ wait(void)
         p->parent = 0;
         p->name[0] = 0;
         p->killed = 0;
+        //create time
+        p->ctime = 0;
+        //terminate time
+        p->ttime = 0;
+        p->stime = 0;
+        p->retime = 0;
+        p->rutime = 0;
+        p->cntTick = 0;
+        p->procQueue = 0;
         release(&ptable.lock);
         return pid;
       }
@@ -246,6 +282,56 @@ wait(void)
     // No point waiting if we don't have any children.
     if(!havekids || proc->killed){
       release(&ptable.lock);
+      return -1;
+    }
+
+    // Wait for children to exit.  (See wakeup1 call in proc_exit.)
+    sleep(proc, &ptable.lock);  //DOC: wait-sleep
+  }
+}
+
+int wait_stat(int *wtime, int *rtime, int *iotime, int *status){
+  struct proc *p;
+  int havekids;
+  acquire(&ptable.lock);
+  for(;;){
+    // Scan through table looking for zombie children.
+    havekids = 0;
+    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+      if(p->parent != proc){
+        continue;
+      }
+      havekids = 1;
+      if(p->state == ZOMBIE){
+        *status = p->pid;
+        *wtime = p->retime;
+        *rtime = p->rutime;
+        *iotime = p->stime;
+        kfree(p->kstack);
+        p->kstack = 0;
+        freevm(p->pgdir);
+        p->state = UNUSED;
+        p->pid = 0;
+        p->parent = 0;
+        p->name[0] = 0;
+        p->killed = 0;
+        // set creation time to 0
+        p->ctime = 0;
+        // set terminal time to 0
+        p->ttime = 0;
+        p->stime = 0;
+        p->rutime = 0;
+        p->retime = 0;
+        p->cntTick = 0;
+        p->procQueue = 0;
+        release(&ptable.lock);
+        return *status;
+      }
+    }
+    // No point waiting if we don't have any children.
+    if(!havekids || proc->killed){
+      release(&ptable.lock);
+      *status = -1;
       return -1;
     }
 
@@ -267,21 +353,18 @@ scheduler(void)
 {
   struct proc *p;
   int foundproc = 1;
-
   for(;;){
     // Enable interrupts on this processor.
     sti();
-
     if (!foundproc) hlt();
-
     foundproc = 0;
-
+    #ifdef DEFAULT
     // Loop over process table looking for process to run.
     acquire(&ptable.lock);
     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-      if(p->state != RUNNABLE)
+      if(p->state != RUNNABLE){
         continue;
-
+      }
       // Switch to chosen process.  It is the process's job
       // to release ptable.lock and then reacquire it
       // before jumping back to us.
@@ -289,6 +372,7 @@ scheduler(void)
       proc = p;
       switchuvm(p);
       p->state = RUNNING;
+      p->cntTick = 0;
       swtch(&cpu->scheduler, proc->context);
       switchkvm();
 
@@ -297,7 +381,69 @@ scheduler(void)
       proc = 0;
     }
     release(&ptable.lock);
+    #endif
 
+    #ifdef FRR
+    // Loop over process table looking for process to run.
+    acquire(&ptable.lock);
+    struct proc* front = 0;
+    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+      if(p->state == RUNNABLE){
+        if(front == 0) front = p;
+        else{
+          if(p->procQueue < front->procQueue){
+            front = p;
+          }
+        }
+      }
+    }
+    if(front != 0){
+      p = front;
+      foundproc = 1;
+      proc = p;
+      switchuvm(p);
+      p->state = RUNNING;
+      p->cntTick = 0;
+      swtch(&cpu->scheduler, proc->context);
+      switchkvm();
+
+      // Process is done running for now.
+      // It should have changed its p->state before coming back.
+      proc = 0;
+    }
+    release(&ptable.lock);
+    #endif
+
+    #ifdef FCFS
+    // Loop over process table looking for process to run.
+    acquire(&ptable.lock);
+    struct proc* front = 0;
+    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+      if(p->state == RUNNABLE){
+        if(front == 0){
+          front = p;
+        }
+        else if(p->ctime < front->ctime){
+          front = p;
+        }
+      }
+    }
+    if(front != 0){
+      p = front;
+      foundproc = 1;
+      proc = p;
+      switchuvm(p);
+      p->state = RUNNING;
+      p->cntTick = 0;
+      swtch(&cpu->scheduler, proc->context);
+      switchkvm();
+
+      // Process is done running for now.
+      // It should have changed its p->state before coming back.
+      proc = 0;
+    }
+    release(&ptable.lock);
+    #endif
   }
 }
 
@@ -327,6 +473,7 @@ yield(void)
 {
   acquire(&ptable.lock);  //DOC: yieldlock
   proc->state = RUNNABLE;
+  proc->procQueue = queueInd++;
   sched();
   release(&ptable.lock);
 }
@@ -400,6 +547,7 @@ wakeup1(void *chan)
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
     if(p->state == SLEEPING && p->chan == chan)
       p->state = RUNNABLE;
+      p->procQueue = queueInd++;
 }
 
 // Wake up all processes sleeping on chan.
